@@ -77,6 +77,7 @@ from .utils import (
     bytewidth as bytewidth,
     c as c,
     commit_shared as commit_shared,
+    debug_assert as debug_assert,
     debug_print as debug_print,
     ds as ds,
     fori as fori,

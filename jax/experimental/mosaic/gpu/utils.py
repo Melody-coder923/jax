@@ -24,10 +24,12 @@ from typing import Any, Literal
 
 import jax
 from jax import numpy as jnp
+from jax._src.lib import mosaic_gpu_dialect as dialect  # noqa: F401
 from jax.interpreters import mlir
 from jaxlib.mlir import ir
 from jaxlib.mlir.dialects import arith
 from jaxlib.mlir.dialects import builtin
+from jaxlib.mlir.dialects import cf
 from jaxlib.mlir.dialects import gpu
 from jaxlib.mlir.dialects import llvm
 from jaxlib.mlir.dialects import memref
@@ -35,8 +37,7 @@ from jaxlib.mlir.dialects import nvvm
 from jaxlib.mlir.dialects import scf
 from jaxlib.mlir.dialects import vector
 import numpy as np
-
-from jax._src.lib import mosaic_gpu_dialect as dialect  # noqa: F401
+import os
 
 # mypy: ignore-errors
 
@@ -1280,3 +1281,13 @@ def vector_concat(vectors: Sequence[ir.Value]) -> ir.Value:
       result = vector.insertelement(elem, result, position=c(offset + i, index))
     offset += vty.shape[0]
   return result
+
+
+def debug_assert(cond: ir.Value, message: str, /) -> None:
+  """Asserts that the given condition is true.
+
+  The assertion is only performed if the ``MOSAIC_GPU_DEBUG`` environment
+  variable is set.
+  """
+  if "MOSAIC_GPU_DEBUG" in os.environ:
+    cf.assert_(cond, message)
