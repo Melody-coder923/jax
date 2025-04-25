@@ -55,6 +55,7 @@ def _maybe_cast_to_int(x: jax.Array | jax_core.AbstractValue):
       return jax_core.ShapedArray(x.shape, lowering.BOOL_MEMREF_TYPE)
     return x
 
+
 _DUMP_PROMELA_TO = config.string_flag(
     "jax_pallas_dump_promela_to",
     default=os.getenv("JAX_PALLAS_DUMP_PROMELA_TO", ""),
@@ -101,6 +102,49 @@ def _get_memory_spaces_from_avals(
   ):
     output_memory_spaces = tuple(map(_get_memory_space_from_aval, out_avals))
   return output_memory_spaces
+
+
+def _get_output_memory_space_colors_from_avals(
+    out_avals: tuple[jax_core.AbstractValue, ...],
+) -> list[tpu_custom_call.OutputMemorySpaceColor] | None:
+  output_memory_spaces = _get_memory_spaces_from_avals(out_avals)
+  if output_memory_spaces is None:
+    return None
+  if len(output_memory_spaces) == 1 and output_memory_spaces[0] is not None:
+    output_memory_space_color = tpu_custom_call.OutputMemorySpaceColor(
+        memory_space=output_memory_spaces[0], shape_index=[]
+    )
+    return [output_memory_space_color]
+
+  output_memory_space_colors = []
+  # TODO(subhankarshah): Add support for coloring nested tuples.
+  for i, output_memory_space in enumerate(output_memory_spaces):
+    if output_memory_space is None:
+      continue
+    output_memory_space_color = tpu_custom_call.OutputMemorySpaceColor(
+        memory_space=output_memory_space, shape_index=[i]
+    )
+    output_memory_space_colors.append(output_memory_space_color)
+  return output_memory_space_colors
+
+
+def _get_input_memory_space_colors_from_avals(
+    in_avals: tuple[jax_core.AbstractValue, ...],
+) -> list[tpu_custom_call.InputMemorySpaceColor] | None:
+  input_memory_spaces = _get_memory_spaces_from_avals(in_avals)
+  if input_memory_spaces is None:
+    return None
+  input_memory_space_colors = []
+  # TODO(subhankarshah): Add support for coloring nested tuples.
+  for i, input_memory_space in enumerate(input_memory_spaces):
+    if input_memory_space is None:
+      continue
+    input_memory_space_color = tpu_custom_call.InputMemorySpaceColor(
+        operand_index=i, memory_space=input_memory_space, shape_index=[i]
+    )
+    input_memory_space_colors.append(input_memory_space_color)
+  return input_memory_space_colors
+
 
 
 def pallas_call_tpu_lowering_rule(
@@ -193,7 +237,8 @@ def pallas_call_tpu_lowering_rule(
           mode="w",
           prefix=mlir.sanitize_name(debug_info.func_name) + "-",
           suffix=".pml",
-          dir=promela_dump_path, delete=False,
+          dir=promela_dump_path,
+          delete=False,
       )
       with dump_ctx as f:
         f.write(model)
@@ -208,6 +253,7 @@ def pallas_call_tpu_lowering_rule(
   def _maybe_cast_inputs(*args):
     args = [_maybe_cast_to_int(x) for x in args]
     return args
+
   kernel_in_avals = [_maybe_cast_to_int(x) for x in ctx.avals_in]
   kernel_out_avals = [_maybe_cast_to_int(x) for x in out_avals]
   cast_ctx = ctx.replace(avals_out=kernel_in_avals)
@@ -217,6 +263,12 @@ def pallas_call_tpu_lowering_rule(
   dynamic_grid_args, args = in_nodes[:num_dyn_bounds], in_nodes[num_dyn_bounds:]
   kernel_ctx = ctx.replace(avals_in=kernel_in_avals, avals_out=kernel_out_avals)
   output_memory_spaces = _get_memory_spaces_from_avals(out_avals)
+  output_memory_space_colors = _get_output_memory_space_colors_from_avals(
+      out_avals
+  )
+  input_memory_space_colors = _get_input_memory_space_colors_from_avals(
+      ctx.avals_in
+  )
   if cost_estimate is not None:
     mosaic_cost_estimate = tpu_custom_call.CostEstimate(
         flops=cost_estimate.flops,
@@ -245,11 +297,18 @@ def pallas_call_tpu_lowering_rule(
       has_side_effects=mosaic_params.has_side_effects,
       output_memory_spaces=output_memory_spaces,
       disable_bounds_checks=mosaic_params.disable_bounds_checks,
+      output_memory_space_colors=output_memory_space_colors,
+      input_memory_space_colors=input_memory_space_colors,
   )
-  _maybe_cast_to_bool = lambda x, aval: x.astype(
-      jax.numpy.bool_) if aval.dtype == jax.numpy.bool_ else x
+  _maybe_cast_to_bool = (
+      lambda x, aval: x.astype(jax.numpy.bool_)
+      if aval.dtype == jax.numpy.bool_
+      else x
+  )
+
   def _maybe_cast_outputs(*args):
     args = [_maybe_cast_to_bool(x, aval) for x, aval in zip(args, out_avals)]
     return args
+
   cast_ctx = ctx.replace(avals_in=kernel_out_avals)
   return mlir.lower_fun(_maybe_cast_outputs)(cast_ctx, *out_nodes)

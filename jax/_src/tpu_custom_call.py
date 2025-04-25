@@ -43,6 +43,7 @@ from jaxlib.mlir.passmanager import PassManager
 
 try:
   from absl import flags
+
   FLAGS = flags.FLAGS
 except ImportError:
   FLAGS = {}
@@ -84,7 +85,8 @@ def get_ir_version(ctx: mlir.LoweringRuleContext) -> int | None:
 
 tpu_custom_call_p = core.Primitive("tpu_custom_call")
 tpu_custom_call_p.def_impl(
-    functools.partial(xla.apply_primitive, tpu_custom_call_p))
+    functools.partial(xla.apply_primitive, tpu_custom_call_p)
+)
 tpu_custom_call_p.multiple_results = True
 
 
@@ -124,12 +126,36 @@ class CostEstimate:
     return (
         f'{{"flops": {self.flops}, "transcendentals": {self.transcendentals},'
         f' "bytes_accessed": {self.bytes_accessed}}}'
-    ).encode('ascii')
+    ).encode("ascii")
+
+
+@dataclasses.dataclass(frozen=True)
+class OutputMemorySpaceColor:
+  memory_space: MemorySpace
+  shape_index: list[int]
+
+  def to_json(self) -> bytes:
+    return (
+        f'{"color": {self.memory_space.color}, "shape_index": [{",".join(str(i) for i in self.shape_index)}]}'
+    ).encode("ascii")
+
+
+@dataclasses.dataclass(frozen=True)
+class InputMemorySpaceColor:
+  operand_index: int
+  memory_space: MemorySpace
+  shape_index: list[int]
+
+  def to_json(self) -> bytes:
+    return (
+        f'{"operand_index": {self.operand_index}, "color": {self.memory_space.color}, "shape_index": [{",".join(str(i) for i in self.shape_index)}]}'
+    ).encode("ascii")
 
 
 @dataclasses.dataclass(frozen=True)
 class CustomCallBackendConfig:
   """Represents an unserialized backend config for custom calls."""
+
   lowered_module_asm: bytes
   has_communication: bool
   collective_id: int | None
@@ -144,6 +170,8 @@ class CustomCallBackendConfig:
   internal_scratch_in_bytes: int | None
   output_memory_spaces: tuple[MemorySpace | None, ...] | None
   disable_bounds_checks: bool
+  output_memory_space_colors: list[OutputMemorySpaceColor] | None
+  input_memory_space_colors: list[InputMemorySpaceColor] | None
 
   # We omit the body while printing, because primitive params get embedded
   # in HLO metadata, and the body blows up its size.
@@ -194,6 +222,22 @@ class CustomCallBackendConfig:
         color = memory_space.color if memory_space is not None else -1
         config.write(str(color).encode("ascii"))
       config.write(b"]")
+    if self.output_memory_space_colors is not None:
+      config.write(b', "output_memory_space_colors": [')
+      for i, memory_space in enumerate(self.output_memory_space_colors):
+        if i:
+          config.write(b",")
+        config.write(memory_space.to_json())
+      config.write(b"]")
+    if self.input_memory_space_colors is not None:
+      config.write(b', "input_memory_space_colors": [')
+      for i, input_memory_space_color in enumerate(
+          self.input_memory_space_colors
+      ):
+        if i:
+          config.write(b",")
+        config.write(input_memory_space_color.to_json())
+      config.write(b"]")
     if self.disable_bounds_checks:
       config.write(b', "disable_bounds_checks": ')
       config.write(str(self.disable_bounds_checks).lower().encode("ascii"))
@@ -209,7 +253,7 @@ class CustomCallBackendConfig:
           b' "size": '
       )
       config.write(str(self.vmem_limit_bytes).encode("ascii"))
-      config.write(b'}]')
+      config.write(b"}]")
     if self.flags is not None:
       config.write(b', "flag_configs": [')
       for i, (flag, value) in enumerate(self.flags.items()):
@@ -276,7 +320,8 @@ def _tpu_custom_call_lowering(
   else:
     result_shapes = [
         mlir.shape_tensor(mlir.eval_dynamic_shape(ctx, aval_out.shape))
-        for aval_out in ctx.avals_out]
+        for aval_out in ctx.avals_out
+    ]
   extra_attributes = None
   # Add kernel_name and kernel_metadata as attributes to the custom call op.
   # This is because we do not want to pollute the backend_config with this
@@ -301,8 +346,9 @@ def _tpu_custom_call_lowering(
   return call.results
 
 
-mlir.register_lowering(tpu_custom_call_p, _tpu_custom_call_lowering,
-                       platform="tpu")
+mlir.register_lowering(
+    tpu_custom_call_p, _tpu_custom_call_lowering, platform="tpu"
+)
 
 
 def _lower_tpu_kernel(
@@ -352,7 +398,9 @@ def _lower_tpu_kernel(
       ]
       pipeline = PassManager.parse(f"builtin.module({','.join(pipeline)})")
       pipeline.run(module.operation)
-      dump_mlir(module, "post-hlo-conversion", get_dump_file_prefix(), kernel_name)
+      dump_mlir(
+          module, "post-hlo-conversion", get_dump_file_prefix(), kernel_name
+      )
 
     sl_cnt, l_cnt = target_shape
     # Note: we don't pass the TpuTilingFlags here, since we don't know the
@@ -367,7 +415,9 @@ def _lower_tpu_kernel(
     ]
     pipeline = PassManager.parse(f"builtin.module({','.join(pipeline)})")
     pipeline.run(module.operation)
-    dump_mlir(module, "post-infer-memref-layout", get_dump_file_prefix(), kernel_name)
+    dump_mlir(
+        module, "post-infer-memref-layout", get_dump_file_prefix(), kernel_name
+    )
 
     pipeline = [
         "canonicalize",
@@ -394,7 +444,9 @@ def _lower_tpu_kernel(
             "builtin.module(func.func(debug-assert-insertion))"
         )
         pipeline.run(module.operation)
-        dump_mlir(module, "post-assert-insertion", get_dump_file_prefix(), kernel_name)
+        dump_mlir(
+            module, "post-assert-insertion", get_dump_file_prefix(), kernel_name
+        )
       elif checks:
         checks.discard("bounds")
         raise ValueError(
@@ -410,7 +462,9 @@ def _lower_tpu_kernel(
     ]
     pipeline = PassManager.parse(f"builtin.module({','.join(pipeline)})")
     pipeline.run(module.operation)
-    dump_mlir(module, "post-canonicalize-mosaic", get_dump_file_prefix(), kernel_name)
+    dump_mlir(
+        module, "post-canonicalize-mosaic", get_dump_file_prefix(), kernel_name
+    )
 
     pipeline = [
         (
@@ -422,7 +476,9 @@ def _lower_tpu_kernel(
     ]
     pipeline = PassManager.parse(f"builtin.module({','.join(pipeline)})")
     pipeline.run(module.operation)
-    dump_mlir(module, "post-infer-vector-layout", get_dump_file_prefix(), kernel_name)
+    dump_mlir(
+        module, "post-infer-vector-layout", get_dump_file_prefix(), kernel_name
+    )
 
     pipeline = [
         (
@@ -434,7 +490,9 @@ def _lower_tpu_kernel(
     ]
     pipeline = PassManager.parse(f"builtin.module({','.join(pipeline)})")
     pipeline.run(module.operation)
-    dump_mlir(module, "post-relayout-insertion", get_dump_file_prefix(), kernel_name)
+    dump_mlir(
+        module, "post-relayout-insertion", get_dump_file_prefix(), kernel_name
+    )
 
     mxu_size = 128 if hardware_generation < 6 else 256
     pipeline = [
@@ -447,7 +505,9 @@ def _lower_tpu_kernel(
     ]
     pipeline = PassManager.parse(f"builtin.module({','.join(pipeline)})")
     pipeline.run(module.operation)
-    dump_mlir(module, "post-apply-vector-layout", get_dump_file_prefix(), kernel_name)
+    dump_mlir(
+        module, "post-apply-vector-layout", get_dump_file_prefix(), kernel_name
+    )
 
     pipeline = [
         "canonicalize",
@@ -491,11 +551,15 @@ def _lower_mosaic_module_to_asm(
         raise ValueError(
             f"Unrecognized TPU device kind: {device_kind}. "
             "tpu_custom_call cannot be lowered on a machine without TPUs "
-            "when mosaic_use_python_pipeline=True.")
+            "when mosaic_use_python_pipeline=True."
+        )
       hardware_generation = int(device_kind[len("TPU v")])
       target_shape = get_target_shape(hardware_generation)
       module = _lower_tpu_kernel(
-          module, hardware_generation, target_shape=target_shape, kernel_name=kernel_name,
+          module,
+          hardware_generation,
+          target_shape=target_shape,
+          kernel_name=kernel_name,
       )
       needs_hlo_passes = False
       needs_layout_passes = False
@@ -577,6 +641,8 @@ def _lower_to_custom_call_config(
     kernel_name: str | None = None,
     ir_version: int | None = None,
     disable_bounds_checks: bool = False,
+    output_memory_space_colors: list[OutputMemorySpaceColor] | None = None,
+    input_memory_space_colors: list[InputMemorySpaceColor] | None = None,
 ) -> CustomCallBackendConfig:
   device_type = _get_device_type(module)
   lowered_module_asm, (
@@ -607,6 +673,8 @@ def _lower_to_custom_call_config(
       needs_layout_passes=needs_layout_passes,
       output_memory_spaces=output_memory_spaces,
       disable_bounds_checks=disable_bounds_checks,
+      input_memory_space_colors=input_memory_space_colors,
+      output_memory_space_colors=output_memory_space_colors,
   )
 
 
@@ -627,6 +695,8 @@ def _lowered_to_custom_call_config(
     device_type: str | None,
     output_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
     disable_bounds_checks: bool = False,
+    output_memory_space_colors: list[OutputMemorySpaceColor] | None = None,
+    input_memory_space_colors: list[InputMemorySpaceColor] | None = None,
 ):
   if has_custom_barrier:
     if collective_id is None:
@@ -643,6 +713,7 @@ def _lowered_to_custom_call_config(
         "vmem_limit_bytes must be an int: provided with a"
         f" {type(vmem_limit_bytes)}."
     )
+  # pass the correct params to custom call config
   config = CustomCallBackendConfig(
       lowered_module_asm,
       has_communication,
@@ -658,6 +729,8 @@ def _lowered_to_custom_call_config(
       internal_scratch_in_bytes,
       output_memory_spaces,
       disable_bounds_checks,
+      output_memory_space_colors,
+      input_memory_space_colors,
   )
   return config
 
@@ -680,6 +753,8 @@ def lower_module_to_custom_call(
     serialization_format: int | None,
     output_memory_spaces: tuple[MemorySpace | None, ...] | None,
     disable_bounds_checks: bool = False,
+    output_memory_space_colors: list[OutputMemorySpaceColor] | None = None,
+    input_memory_space_colors: list[InputMemorySpaceColor] | None = None,
 ) -> Sequence[ir.Value]:
   config = _lower_to_custom_call_config(
       module,
@@ -695,6 +770,8 @@ def lower_module_to_custom_call(
       kernel_name=kernel_name,
       ir_version=get_ir_version(ctx),
       disable_bounds_checks=disable_bounds_checks,
+      output_memory_space_colors=output_memory_space_colors,
+      input_memory_space_colors=input_memory_space_colors,
   )
   return _tpu_custom_call_lowering(
       ctx,
@@ -724,6 +801,8 @@ def as_tpu_kernel(
     serialization_format: int | None = 1,
     output_memory_spaces: tuple[MemorySpace | None, ...] | None = None,
     disable_bounds_checks: bool = False,
+    output_memory_space_colors: list[OutputMemorySpaceColor] | None = None,
+    input_memory_space_colors: list[InputMemorySpaceColor]  | None = None,
 ) -> Callable[..., Any]:
   """Turns an MLIR Mosaic kernel into a JAX-compatible function."""
   config = _lower_to_custom_call_config(
@@ -739,6 +818,8 @@ def as_tpu_kernel(
       output_memory_spaces=output_memory_spaces,
       kernel_name=kernel_name,
       disable_bounds_checks=disable_bounds_checks,
+      output_memory_space_colors=output_memory_space_colors,
+      input_memory_space_colors=input_memory_space_colors,
   )
   return _as_jax_callable(
       config,
@@ -768,6 +849,8 @@ def lowered_as_tpu_kernel(
     serialization_format: int | None = None,
     internal_scratch_in_bytes: int | None = None,
     disable_bounds_checks: bool = False,
+    output_memory_space_colors: list[OutputMemorySpaceColor] | None = None,
+    input_memory_space_colors: list[InputMemorySpaceColor] | None = None,
 ) -> Callable[..., Any]:
   device_type = _get_device_type(lowered_module)
   lowered_module_asm = lowered_module.operation.get_asm(
@@ -788,6 +871,8 @@ def lowered_as_tpu_kernel(
       needs_hlo_passes=needs_hlo_passes,
       needs_layout_passes=needs_layout_passes,
       disable_bounds_checks=disable_bounds_checks,
+      output_memory_space_colors=output_memory_space_colors,
+      input_memory_space_colors=input_memory_space_colors,
   )
   return _as_jax_callable(
       config,
