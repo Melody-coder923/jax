@@ -1606,6 +1606,21 @@ class PallasCallDMATest(PallasBaseTest):
       np.testing.assert_array_equal(y, i)
       del y
 
+  def test_scalar_any_input(self):
+    def kernel(src, dst, sem):
+      pltpu.async_copy(src, dst, sem).wait()
+
+    def run(src):
+      return pl.pallas_call(
+          kernel,
+          out_shape=jax.ShapeDtypeStruct(src.shape, jnp.float32),
+          in_specs=[pl.BlockSpec(memory_space=pltpu.ANY)],
+          scratch_shapes=[pltpu.SemaphoreType.DMA],
+          out_specs=pl.BlockSpec(memory_space=pltpu.SMEM),
+      )(src)
+    x = jnp.full((1,), 3.1415, dtype=jnp.float32)
+    np.testing.assert_array_equal(run(x), x)
+
   def test_dynamic_dma_on_2nd_minor(self):
     def kernel(array, data, index, size, _, sem):
       pltpu.async_copy(
